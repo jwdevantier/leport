@@ -32,6 +32,8 @@ def search(cfg: Config, pkgname: str, max_l_dist: int = 1) -> List[PkgSearchMatc
     for repo in cfg.repos:
         repo_matches = []
         dir = repo.repo_dir(cfg)
+        if not dir.exists():
+            continue
         for pkg_dir in (d for d in dir.iterdir() if d.is_dir()):
             m = fuzzysearch.find_near_matches(pkgname, pkg_dir.name, max_l_dist=max_l_dist)
             if len(m) != 0:
