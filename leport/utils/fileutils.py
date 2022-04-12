@@ -78,13 +78,23 @@ def cwd(path: Union[str, Path]):
         os.chdir(curr_cwd)
 
 
-def walk(path: Union[str, Path]) -> Generator[Path, None, None]:
+def walk(root_path: Union[str, Path], include_dirs: bool = False) -> Generator[Path, None, None]:
     """Recursively traverse `path`, yielding the resolved path to each file."""
-    for p in Path(path).iterdir():
-        if p.is_dir():
-            yield from walk(p)
-            continue
-        yield p.absolute()
+    if include_dirs:
+        def _walk(path: Path):
+            for p in Path(path).iterdir():
+                if p.is_dir():
+                    yield from _walk(p)
+                yield p.relative_to(root_path)
+    else:
+        def _walk(path: Path):
+            for p in Path(path).iterdir():
+                if p.is_dir():
+                    yield from _walk(p)
+                    continue
+                yield p.relative_to(root_path)
+
+    yield from _walk(root_path)
 
 
 def temp_direntry(dir: Path) -> Path:
