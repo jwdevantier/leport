@@ -134,8 +134,7 @@ def makepkg(info: PkgInfo, pkg_dir: PkgDir, pkg_root: Path, dest: Path):
 
             manifest = PkgManifest(files=manifest_entries)
             with open(pkg_root / "manifest.yml", "w") as fh:
-                # TODO: see above
-                yaml.dump(json.loads(manifest.json()), fh)
+                manifest.to_yaml(fh)
             tar.add(pkg_root / "manifest.yml", arcname="manifest.yml")
 
 
