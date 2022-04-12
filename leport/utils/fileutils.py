@@ -84,7 +84,7 @@ def walk(path: Union[str, Path]) -> Generator[Path, None, None]:
         if p.is_dir():
             yield from walk(p)
             continue
-        yield p.resolve()
+        yield p.absolute()
 
 
 def temp_direntry(dir: Path) -> Path:
