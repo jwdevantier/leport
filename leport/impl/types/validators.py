@@ -64,22 +64,6 @@ class GitDirectoryPath(Path):
 ConcretePath = type(Path.home())
 
 
-class DirOrMissing(ConcretePath):
-    @classmethod
-    def __get_validators__(cls) -> 'CallableGenerator':
-        yield path_validator
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, value: Path) -> Path:
-        svalue = str(value)
-        if svalue.startswith("~"):
-            value = user_home() / str(value)[1 if len(svalue) > 1 and svalue[1] != "/" else 2:]
-        if value.exists() and not value.is_dir():
-            raise ValueError("exists, but is not a directory")
-        return value
-
-
 class FilenamePath(ConcretePath):
     @classmethod
     def __get_validators__(cls) -> 'CallableGenerator':

@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union, List, Dict
-from pydantic import BaseModel, Field, Extra
+from typing import Optional, Union, List, Dict, Any
+from pydantic import BaseModel, Field, Extra, validator
 from pydantic import HttpUrl
 import yaml
 from leport.impl.types.validators import GitDirectoryPath, FilenamePath, PkgDirPath, PkgPath
@@ -83,10 +83,40 @@ class PkgInfo(BaseModel):
         return PkgInfo(**yaml.load(txt, Loader=yaml.Loader))
 
 
+class PkgManifestStat(BaseModel):
+    user: str
+    group: str
+    mode: str
+
+    @validator("mode")
+    def valid_mode(cls, v):
+        if not isinstance(v, str):
+            raise ValueError(f"expected mode expressed as a string value")
+        v = v.strip()
+        if not len(v) == 3:
+            raise ValueError(f"expected a 3-digit octal value")
+
+        for ch in v:
+            if ch not in {"0", "1", "2", "4", "7", "6", "5", "4", "3"}:
+                raise ValueError("not a valid octal mode value")
+        return v
+
+
 class PkgManifest(BaseModel):
     """Represents the package manifest in full."""
-    # Path -> Sha256
-    files: Dict[Path, str]
+    # (file) Path -> Sha256
+    file_checksums: Dict[Path, str]
+    # (file|dir) Path -> ownership information
+    stat: Dict[Path, PkgManifestStat]
+
+    def serialize(self) -> Dict[str, Any]:
+        return {
+            "file_checksums": {str(k): v for k, v in self.file_checksums.items()},
+            "stat": {str(k): stat.dict() for k, stat in self.stat.items()}
+        }
+
+    def to_yaml(self, stream):
+        yaml.dump(self.serialize(), stream)
 
     @staticmethod
     def from_yaml(yml: Union[str, Path]) -> "PkgManifest":
@@ -123,9 +153,54 @@ class PkgFile(BaseModel):
 
 
 class PkgBuildSteps(ABC):
-    def __init__(self, info: PkgInfo, build_dir: Path):
-        self.info = info
-        self.build_dir = build_dir
+    def __init__(self, info: PkgInfo, build_dir: Path, dest_dir: Path):
+        self.__info = info
+        self.__build_dir = build_dir
+        self.__dest_dir = dest_dir
+        self.__perms = {}
+        self.on_init()
+
+    def on_init(self) -> None:
+        pass
+
+    @property
+    def info(self) -> PkgInfo:
+        return self.__info
+
+    @property
+    def build_dir(self) -> Path:
+        return self.__build_dir
+
+    @property
+    def dest_dir(self) -> Path:
+        return self.__dest_dir
+
+    @property
+    def stat(self) -> Dict[Path, Dict[str, str]]:
+        return {**self.__perms}
+
+    def set_stat(self, path: Path,
+                  user: Optional[str],
+                  group: Optional[str],
+                  mode: Optional[str]):
+
+        if path not in self.__perms:
+            opts = {}
+            self.__perms[path] = opts
+        else:
+            opts = self.__perms[path]
+
+        if path.is_absolute():
+            raise RuntimeError("perms cannot be set on absolute paths, must be set relative to the dest_dir")
+        if not (self.dest_dir / path).exists():
+            raise RuntimeError("error defining perms for '{path}' in dest_dir, file/directory does not exist")
+
+        if user:
+            opts["user"] = user
+        if group:
+            opts["group"] = group
+        if mode:
+            opts["mode"] = mode
 
     @abstractmethod
     def prepare(self, build_dir: Path):

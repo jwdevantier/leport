@@ -31,10 +31,11 @@ from pathlib import Path
 import shutil
 import json
 import tarfile
+from typing import Dict
 from rich import print
 from rich.progress import Progress
 import yaml
-from leport.impl.types.pkg import PkgDir, PkgInfo, PkgFileSource, PkgHttpSource, PkgGitSource, PkgBuildSteps, PkgManifest
+from leport.impl.types.pkg import PkgDir, PkgInfo, PkgFileSource, PkgHttpSource, PkgGitSource, PkgBuildSteps, PkgManifest, PkgManifestStat
 from leport.impl.config import get_config, Config
 from leport.utils.fileutils import sha256sum, fetch_with_progress, load_module_from_path, cwd, walk
 import leport.utils.git as lgit
@@ -96,7 +97,11 @@ def prepare_step(cfg: Config, pkgdir: PkgDir, info: PkgInfo, build_dir: Path):
     pass
 
 
-def makepkg(info: PkgInfo, pkg_dir: PkgDir, pkg_root: Path, dest: Path):
+def makepkg(info: PkgInfo,
+            pkg_dir: PkgDir,
+            pkg_root: Path,
+            perms: Dict[Path, Dict[str, str]],
+            dest: Path):
     with Progress() as progress:
         with tarfile.open(dest, "w:xz") as tar:
             # ensure metadata files do not exist in package root while we compute the package manifest
@@ -123,16 +128,39 @@ def makepkg(info: PkgInfo, pkg_dir: PkgDir, pkg_root: Path, dest: Path):
             tar.add(pkg_root / "info.yml", arcname="info.yml")
 
             # compute manifest by walking through
-            manifest_entries = {}
-            manifest_task = progress.add_task(
+            checksums = {}
+            checksum_task = progress.add_task(
                 "calculating package file checksums...",
                 total=len(list(walk(pkg_root)))
             )
-            for file in walk(pkg_root):
-                manifest_entries[str(Path("/") / file.relative_to(pkg_root))] = sha256sum(file)
-                progress.update(manifest_task, advance=1)
 
-            manifest = PkgManifest(files=manifest_entries)
+            root_path = Path("/")
+            for file in walk(pkg_root):
+                checksums[str(root_path / file)] = sha256sum(pkg_root / file)
+                progress.update(checksum_task, advance=1)
+
+            # determine set of all files & dirs part of this package
+            pkg_contents = set(walk(pkg_root, include_dirs=True))
+            pkg_contents.remove(Path("info.yml"))
+
+            # ... and compare it to the set of all files/dirs for which the pkg defined permissions
+            pkg_perms = set(perms.keys())
+            if (pkg_contents - pkg_perms):
+                print("UN-PERMED FILES")
+                print(pkg_contents - pkg_perms)
+                # TODO: some files/dirs have no perms assigned, raise error
+                import sys
+                sys.exit(1)
+            else:
+                print("ALL PERMED")
+
+            # TODO: can raise errors if entry does not have all required fields set.
+            print(repr(perms))
+            manifest = PkgManifest(
+                file_checksums=checksums,
+                stat={root_path / k: PkgManifestStat(**v)
+                       for k, v in perms.items()}
+            )
             with open(pkg_root / "manifest.yml", "w") as fh:
                 manifest.to_yaml(fh)
             tar.add(pkg_root / "manifest.yml", arcname="manifest.yml")
@@ -141,8 +169,8 @@ def makepkg(info: PkgInfo, pkg_dir: PkgDir, pkg_root: Path, dest: Path):
 def build(pkg_dir: PkgDir, clean: bool = True):
     info = PkgInfo.from_yaml(pkg_dir.info_yml)
     cfg = get_config()
-    build_dir: Path = cfg.dirs.build / pkg_dir.repo.name / pkg_dir.name
-    dest_dir = cfg.dirs.data / "destdir" / pkg_dir.repo.name / pkg_dir.name
+    build_dir: Path = cfg.build / pkg_dir.repo.name / pkg_dir.name
+    dest_dir = cfg.data / "destdir" / pkg_dir.repo.name / pkg_dir.name
 
     if clean and build_dir.exists():
         shutil.rmtree(build_dir)
@@ -163,7 +191,7 @@ def build(pkg_dir: PkgDir, clean: bool = True):
     if (not hasattr(build_module, "Build")
         or not issubclass(build_module.Build, PkgBuildSteps)):
         raise ValueError("invalid build module - must export `Build` type of type PkgBuildSteps")
-    build: PkgBuildSteps = build_module.Build(info, build_dir)
+    build: PkgBuildSteps = build_module.Build(info, build_dir, dest_dir)
 
     # # delegate to prepare
     print("[bold][cyan]:: [/cyan]`prepare` step")
@@ -193,11 +221,11 @@ def build(pkg_dir: PkgDir, clean: bool = True):
     with cwd(build_dir):
         build.install(build_dir, dest_dir)
 
-    pkg_dest = cfg.dirs.pkgs / pkg_dir.repo.name / f"{pkg_dir.name}.xz"
+    pkg_dest = cfg.pkgs / pkg_dir.repo.name / f"{pkg_dir.name}.xz"
     pkg_dest.unlink(missing_ok=True)
     pkg_dest.parent.mkdir(parents=True, exist_ok=True)
     print("[bold][cyan]:: [/cyan]Creating package file...")
-    makepkg(info, pkg_dir, dest_dir, pkg_dest)
+    makepkg(info, pkg_dir, dest_dir, build.stat, pkg_dest)
     print(f"[bold][green]Success! Package stored at '{pkg_dest}'")
 
 

@@ -1,3 +1,4 @@
+import functools
 import sys
 import os
 from typing import Optional
@@ -7,7 +8,7 @@ import click
 from rich import print
 from rich.prompt import Confirm
 from pydantic.errors import PydanticValueError
-from leport.impl.config import get_config, set_config, get_config_file_path, set_config_file_path, DEFAULT_CONFIG
+from leport.impl.config import set_leport_root, get_leport_root, load_config, get_config, DEFAULT_CONFIG
 import leport.impl.db as db
 import leport.impl.pkg as pkg
 import leport.impl.pkgbuild as pkgbuild
@@ -15,14 +16,7 @@ from leport.impl.types.pkg import PkgName, PkgFile
 from leport.impl.types.repos import RepoNotFoundError
 from leport.impl.repos import refresh_repos
 from leport.utils.cli import command
-
-
-def yes_or_no(question: str) -> bool:
-    while True:
-        print(question + f" (y/n)", end=" ")
-        reply = input().lower().strip()
-        if reply in ("y", "yes", "n", "no"):
-            return reply in ("y", "yes")
+from leport.utils.fileutils import sh, group_info, current_group
 
 
 class NaturalOrderGroup(click.Group):
@@ -31,86 +25,111 @@ class NaturalOrderGroup(click.Group):
 
 
 app = typer.Typer(cls=NaturalOrderGroup, no_args_is_help=True)
-# add_typer_with_alias(
-#     app,
-#     leport.commands.repos.app,
-#     name="repos",
-#     alias="r",
-#     help="commands to manage repos"
-# )
 
 
 @app.callback()
-def _pre_command(ctx: typer.Context, config: Path = None):
-    set_config_file_path(config)
-
+def _pre_command(ctx: typer.Context, root_dir: Path = None):
     # if not 'init', validate that config dirs exist
     if ctx.invoked_subcommand != "init":
-        # init must initialize the config instance itself
-        set_config()
+        # init must initialize the config object itself.
+        set_leport_root(root_dir)
+        load_config()
 
-        cfg = get_config()
-        err = False
-        for dir in ["repos", "build", "pkgs"]:
-            val = getattr(cfg.dirs, dir)
-            if not val.exists():
-                print(f"dirs.{dir}: invalid value, '{val}' does not exist")
-                err = True
-        if err:
-            print("\nOne or more directories is missing, maybe you forgot to run the `init` command?")
+    # ensure perms default to:
+    # directories:  775
+    # files:        664
+    os.umask((0o666 - 0o664))
+    return
+
+
+def require_leport_group(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        group_name = "leport"
+        leport_group = group_info(group_name)
+        if leport_group is None:
+            print(f"Leport uses group [cyan]{group_name}[/cyan] to allow multiple users to use the program")
+            print("to manage ports. But the group was not found on your system, try to run the")
+            print("`init` command to properly initialize the system")
             sys.exit(1)
+
+        cg = current_group()
+
+        if cg.gr_name != group_name:
+            print(f"Your current shell group is [cyan]{cg.gr_name}[/cyan], while Leport")
+            print(f"expects the group [cyan]{group_name}[/cyan] which owns the shared state")
+            print(f"and configuration files in {str(get_leport_root())}.")
+            print("")
+            print(f"Please change to the proper group, e.g. by calling `newgrp {group_name}`")
+            print("before running the leport command.")
+            sys.exit(1)
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def require_root(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if os.geteuid():
+            print("[bold red]> You need root privileges for this action, use sudo")
+            sys.exit(1)
+        return fn(*args, **kwargs)
+    return wrapper
 
 
 @command(app, name="init")
+@require_root
 def init():
     """Initialize configuration file and directories"""
-    cfg_fpath = get_config_file_path()
 
-    if not cfg_fpath.exists():
-        if yes_or_no(f"No configuration file found at '{cfg_fpath}', create?"):
-            with open(cfg_fpath, "w") as fh:
-                for line in DEFAULT_CONFIG.splitlines():
-                    print(line, file=fh)
-        else:
-            print("\nNo configuration file, aborting...")
-            sys.exit(2)
+    group_name = "leport"
+    leport_group = group_info(group_name)
+    if leport_group is None:
+        print("Leport uses a group to allow multiple non-root users to administrate system ports.")
+        if not Confirm.ask("Create group [cyan]leport[/cyan] ?"):
+            print("OK, aborting.")
+            sys.exit(1)
+        sh("groupadd", group_name)
 
-    set_config()
-    cfg = get_config()
+    root = get_leport_root()
+    cfg_fpath = root / "config.yml"
 
-    print("Based on the configuration file, the following settings would be used:")
-    print(f"repos directory: '{cfg.dirs.repos}'")
-    print(f"   (this is where local ports and git clones of upstream repositories will reside)")
-    print(f"data directory: '{cfg.dirs.data}'")
-    print(f"   This contains the database tracking installed files and packages")
-    print(f"   as well as the build directory where data is stored temporarily while building packages.")
-    print(f"pkgs directory: '{cfg.dirs.pkgs}'")
-    print(f"   (this is where the finished packages will be built)")
-    print()
-    if not yes_or_no("proceed with these settings?"):
-        print(f"OK, aborting, please edit the config at '{cfg_fpath}' and re-run `init`")
+    print(f"LEPORT_ROOT: {root}")
+    print("")
+    print("Continuing initialization will create and populate the directory")
+    print(f"at '{root}'.")
+    print("")
+    print("The root directory is determined by (from highest to lowest priority):")
+    print("1) the `--root-dir` command-line parameter")
+    print("2) the LEPORT_ROOT environment variable")
+    print("3) the default path of '/opt/leport'")
+
+    if not Confirm.ask("Continue with initialization of root directory?"):
+        print("OK, aborting.")
         sys.exit(0)
 
-    # create directories, if missing.
-    for key in ["repos", "data", "build", "pkgs"]:
-        val = getattr(cfg.dirs, key)
-        if not val.exists():
-            val.mkdir(parents=True)
+    for dir in [ root / "repos",
+                 root / "data",
+                 root / "data" / "registry",
+                 root / "pkgs"]:
+        dir.mkdir(parents=True, exist_ok=True)
+        sh("chgrp", "-R", group_name, str(dir))
+
+    if not cfg_fpath.exists():
+        with open(cfg_fpath, "w") as fh:
+            for line in DEFAULT_CONFIG.splitlines():
+                print(line, file=fh)
+
+    sh("chgrp", group_name, str(cfg_fpath))
+    sh("chmod", "664", str(cfg_fpath))
+
+    load_config()
 
     # finally, initialize the package database
     db.init_db()
+    sh("chgrp", group_name, str(get_config().db_fpath))
 
-
-# TODO: remove
-@app.command()
-def dbclear():
-    import leport.impl.db as db
-    from pypika import Query, Table
-    t_pkg = Table("pkgs")
-    t_files = Table("files")
-    with db.get_conn() as conn:
-        conn.execute(str(Query.from_(t_pkg).delete()))
-        conn.execute(str(Query.from_(t_files).delete()))
+    refresh_repos(get_config())
 
 
 @app.command()
@@ -126,7 +145,16 @@ def dbreset():
         conn.execute(db.q_create_dirs_table())
 
 
+@app.command()
+def lolcaek(pkg: str):
+    import leport.impl.db as db
+    with db.get_conn() as conn:
+        for fpath, count in db.pkg_dirs(conn, pkg):
+            print(f"{fpath}\t=>\t{count}")
+
+
 @command(app, name="search", alias="s", no_args_is_help=True)
+@require_leport_group
 def search(name: str = typer.Argument(..., help="name of package to search for"),
            dist: int = typer.Argument(2, help="accepted levenshtein distance, increase for more tolerant fuzzy search")):
     """Search for package among repositories"""
@@ -141,6 +169,7 @@ def search(name: str = typer.Argument(..., help="name of package to search for")
 
 
 @command(app, name="packages", alias="pls", no_args_is_help=False)
+@require_leport_group
 def pkg_list():
     """List installed packages"""
     with db.get_conn() as conn:
@@ -154,6 +183,7 @@ def pkg_list():
 
 
 @command(app, name="build", alias="b", no_args_is_help=True)
+@require_leport_group
 def build(pkg_name: str = typer.Argument(..., metavar="pkg", help="name of package, either '<pkg>' or qualified '<repo>/<pkg>'"),
             clean: bool = typer.Option(True, help="if set, clean build directory and start from scratch")):
     """Build package from port recipe."""
@@ -174,6 +204,7 @@ def build(pkg_name: str = typer.Argument(..., metavar="pkg", help="name of packa
 
 
 @command(app, name="install", alias="i", no_args_is_help=True)
+@require_root
 def install(pkg_fpath: Path = typer.Argument(..., metavar="pkg", exists=True, file_okay=True, readable=True, help="path to packagefile"),
             force: bool = typer.Option(default=False, help="automatically accept package overwrites")):
     """Install binary package"""
@@ -181,10 +212,6 @@ def install(pkg_fpath: Path = typer.Argument(..., metavar="pkg", exists=True, fi
         pkg_file = PkgFile(path=pkg_fpath)
     except PydanticValueError as e:
         print(e)
-        sys.exit(1)
-
-    if os.geteuid():
-        print("[bold red]> You need root privileges for this action, use sudo")
         sys.exit(1)
 
     with db.get_conn() as conn:
@@ -229,6 +256,7 @@ def install(pkg_fpath: Path = typer.Argument(..., metavar="pkg", exists=True, fi
 
 
 @command(app, name="remove", alias="rm", no_args_is_help=True)
+@require_root
 def remove(pkg_name: str = typer.Argument(..., metavar="pkg", help="name of package, either '<pkg>' or qualified '<repo>/<pkg>'")):
     """Remove package from system"""
     print("remove")
@@ -239,6 +267,7 @@ def remove(pkg_name: str = typer.Argument(..., metavar="pkg", help="name of pack
 
 
 @command(app, name="which", alias="w", no_args_is_help=True)
+@require_leport_group
 def which(file: Path = typer.Argument(..., help="check which package (if any) owns this file")):
     """which package owns file? (if any)"""
     conn = db.get_conn()
@@ -252,6 +281,7 @@ def which(file: Path = typer.Argument(..., help="check which package (if any) ow
 
 
 @command(app, name="files", alias="fls", no_args_is_help=True)
+@require_leport_group
 def pkg_files(pkg_name: str = typer.Argument(..., metavar="pkg", help="TODO TODO")):
     """Query files owned by a given package"""
     conn = db.get_conn()
@@ -266,14 +296,15 @@ def pkg_files(pkg_name: str = typer.Argument(..., metavar="pkg", help="TODO TODO
 
 
 @command(app, name="refresh", alias="rr", no_args_is_help=False)
+@require_leport_group
 def repos_refresh(repo: Optional[str] = typer.Argument(None, help="repo to refresh (default: all repos)")):
     """refresh one or all git repos"""
-    print("TODO: refresh repo :vampire:")
     cfg = get_config()
     refresh_repos(cfg, repo)
 
 
 @command(app, name="repos", alias="rls", no_args_is_help=False)
+@require_leport_group
 def repos_list():
     """List configured repos"""
     cfg = get_config()

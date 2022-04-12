@@ -25,7 +25,7 @@ class BaseRepo(BaseModel, ABC):
         ...
 
     def repo_dir(self, config: "Config") -> Path:
-        return config.dirs.repos / self.name
+        return config.repos_path / self.name
 
     class Config:
         extra = Extra.allow

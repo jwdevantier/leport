@@ -73,7 +73,7 @@ def has_pkg(conn: sqlite3.Connection, pkg_name: str) -> bool:
 def record_files(conn: sqlite3.Connection, pkg: str, manifest: PkgManifest) -> None:
     conn.executemany(
         "INSERT INTO files (fpath, pkg, sha256) VALUES (?, ?, ?)",
-        ((str(fpath), pkg, sha256) for fpath, sha256 in manifest.files.items())
+        ((str(fpath), pkg, sha256) for fpath, sha256 in manifest.file_checksums.items())
     )
 
 
@@ -128,6 +128,7 @@ def init_db():
         conn.execute(q_create_pkgs_table())
         conn.execute(q_create_files_table())
         conn.execute(q_create_index("files", ["pkg"]))
+        conn.execute(q_create_dirs_table())
 
 # Query: package files // dpkg -L <pkg>
 # Query: packages // dpkg -l

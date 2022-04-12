@@ -1,5 +1,7 @@
+import os
 from abc import ABC, abstractmethod
 import shutil
+import stat
 from typing import List, Optional, Generator, Tuple, Set
 import tarfile
 from pathlib import Path
@@ -10,7 +12,7 @@ import fuzzysearch
 from leport.impl.config import Config
 from leport.impl.types.repos import Repo, RepoNotFoundError
 from leport.impl.types.pkg import PkgSearchMatch, PkgName, PkgDir, PkgFile, PkgInfo, PkgManifest, PkgHooks
-from leport.utils.fileutils import load_module_from_path, temp_direntry, sha256sum
+from leport.utils.fileutils import load_module_from_path, temp_direntry, sha256sum, group_gid, user_uid
 import leport.impl.db as db
 from rich import print
 
@@ -129,7 +131,7 @@ def load_pkg_hooks(pkg_name: str, hooks_path: Path) -> Type[PkgHooks]:
 def install_conflicts(pkg: PkgFile) -> Generator[Path, None, None]:
     "yields paths of all the files in the package for which a file already exists on the system"
     manifest = extract_manifest(pkg)
-    for fpath in manifest.files.keys():
+    for fpath in manifest.file_checksums.keys():
         if fpath.exists():
             yield fpath
 
@@ -213,29 +215,61 @@ class DeleteOnError(ReversibleAction):
             self._path.unlink()
 
 
+class Chown(ReversibleAction):
+    def __init__(self, path: Path, uid: int = -1, gid: int = -1):
+        self._path = path
+        s = path.stat()
+        self._uid = uid
+        self._uid_old = -1 if uid == -1 else s.st_uid
+        self._gid = gid
+        self._gid_old = -1 if gid == -1 else s.st_gid
+
+    def apply(self):
+        os.chown(self._path, uid=self._uid, gid=self._gid)
+
+    def revert(self):
+        os.chown(self._path, uid=self._uid_old, gid=self._gid_old)
+
+
+class Chmod(ReversibleAction):
+    mode_mask: int = stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO
+
+    def __init__(self, path: Path, mode: int):
+        self._path = path
+        self._mode = mode
+        m = path.stat().st_mode
+        self._old_mode = m & self.mode_mask
+
+    def apply(self):
+        os.chmod(self._path, mode=self._mode)
+
+    def revert(self):
+        os.chmod(self._path, mode=self._old_mode)
+
+
 class ReversibleFileActions(object):
     def __init__(self):
         self._actions: List[ReversibleAction] = []
 
     def rm(self, path: Path):
-        print(f"rm({path})")
         self._actions.append(RmFile(path))
 
     def rmtree(self, path: Path):
-        print(f"rmtree({path})")
         self._actions.append(RmTree(path))
 
     def mkdir(self, path: Path) -> Path:
-        print(f"mkdir({path})")
         a = MkDir(path)
-        print("mkdir o")
         self._actions.append(a)
-        print("mkdir done")
         return a.tmp_path
 
     def delete_on_error(self, path: Path):
-        print(f"delete_on_error({path})")
         self._actions.append(DeleteOnError(path))
+
+    def chown(self, path: Path, *, uid: int = -1, gid: int = -1):
+        self._actions.append(Chown(path, uid=uid, gid=gid))
+
+    def chmod(self, path: Path, mode: int):
+        self._actions.append(Chmod(path, mode))
 
     def __enter__(self):
         return self
@@ -269,20 +303,30 @@ def install(config: Config, pkg: PkgFile, conflicts: List[Tuple[Path, bool]]):
             with tar.extractfile("manifest.yml") as fh:
                 manifest = PkgManifest.from_yaml(fh.read().decode("utf-8"))
 
-            install_md_dir = fs.mkdir((config.dirs.pkg_registry / info.name))
+            install_md_dir = fs.mkdir((config.pkg_registry / info.name))
+            leport_gid = group_gid("leport", missing_ok=False)
 
             # copy `info.yml`, `manifest.yml` and `hooks.py` (if it exists) into the
             # install metadata directory.
             with tar.extractfile("info.yml") as src:
-                with open(install_md_dir / "info.yml", "wb") as dst:
+                fpath = install_md_dir / "info.yml"
+                with open(fpath, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+                fs.chown(fpath, gid=leport_gid)
+                fs.delete_on_error(fpath)
             with tar.extractfile("manifest.yml") as src:
-                with open(install_md_dir / "manifest.yml", "wb") as dst:
+                fpath = install_md_dir / "manifest.yml"
+                with open(fpath, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+                fs.chown(fpath, gid=leport_gid)
+                fs.delete_on_error(fpath)
             if "hooks.py" in tar.getnames():
                 with tar.extractfile("hooks.py") as src:
-                    with open(install_md_dir / "hooks.py", "wb") as dst:
+                    fpath = install_md_dir / "hooks.py"
+                    with open(fpath, "wb") as dst:
                         shutil.copyfileobj(src, dst)
+                    fs.chown(fpath, gid=leport_gid)
+                    fs.delete_on_error(fpath)
 
             try:
                 conn = db.get_conn()
@@ -310,7 +354,6 @@ def install(config: Config, pkg: PkgFile, conflicts: List[Tuple[Path, bool]]):
                     # extract all entries under 'files/' and strip 'files/' from path
                     strip_prefix_len = len("files/")
                     for member in tf.getmembers():
-                        print(f"m: {member.path}")
                         if member.path.startswith("files/"):
                             member.path = member.path[strip_prefix_len:]
                             p = Path("/" + member.path)
@@ -336,20 +379,29 @@ def install(config: Config, pkg: PkgFile, conflicts: List[Tuple[Path, bool]]):
                 installed_files_checksums = {}
 
                 for fpath in installed_files:
-                    if fpath.is_dir():
-                        continue
                     actual_hash = sha256sum(fpath)
                     installed_files_checksums[fpath] = actual_hash
                     try:
-                        if manifest.files[fpath] != actual_hash:
-                            raise RuntimeError(f"{fpath}: expected {manifest.files[fpath]}, got {actual_hash}")
+                        if manifest.file_checksums[fpath] != actual_hash:
+                            raise RuntimeError(f"{fpath}: expected {manifest.file_checksums[fpath]}, got {actual_hash}")
                     except KeyError:
-                        print(repr(manifest.files))
+                        print(repr(manifest.file_checksums))
                         raise RuntimeError(f"{fpath}: no entry found in manifest!")
 
+                for fpath in installed:
+                    s = manifest.stat[fpath]
+                    # No need to reverse these actions, files/dirs will be removed on failure
+                    os.chmod(fpath, int(s.mode, base=8))
+                    os.chown(fpath,
+                             uid=user_uid(s.user, missing_ok=False),
+                             gid=group_gid(s.group, missing_ok=False))
+
                 # record entries for files which we've installed and whose hash matched the one in the manifest
-                db.record_files(conn, info.name, PkgManifest(files=installed_files_checksums))
-                db.record_dirs(conn, info.name, [d for d in installed if d.is_dir()])
+                db.record_files(conn, info.name, PkgManifest(
+                    file_checksums=installed_files_checksums,
+                    stat=manifest.stat
+                ))
+                db.record_dirs(conn, info.name, installed_dirs)
                 db.record_pkg(conn, info)
 
                 try:
@@ -368,7 +420,7 @@ def remove(config: Config, name: PkgName):
     if name.repo is not None:
         raise ValueError("installed packages do not use repo prefix, e.g. `rm vim` not `rm <my-repo>/vim`")
     try:
-        install_md_dir = (config.dirs.pkg_registry / name.name)
+        install_md_dir = (config.pkg_registry / name.name)
         if not install_md_dir.exists():
             raise ValueError("package not in registry")
         if not install_md_dir.is_dir():
