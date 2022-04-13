@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 
 
 def get_requirements():
@@ -9,7 +9,7 @@ def get_requirements():
 
 setup(
     name="leport",
-    packages=["leport"],
+    packages=find_packages(exclude=["tests", "tests.*"]),
     version="0.1.0",
     description="ports-like package management",
     author="Jesper Wendel Devantier",
@@ -19,7 +19,7 @@ setup(
     options={"bdist_wheel": {"universal": True}},
     entry_points = {
         "console_scripts": [
-            "leport=leport.__main__:main"
+            "leport=leport.main:main"
         ]
     },
     classifiers=[
