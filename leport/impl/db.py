@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from pypika import Query, Column, Table
 from leport.impl.config import get_config
-from leport.impl.types.pkg import PkgManifest
+from leport.impl.types.pkg import PkgManifest, PkgInfo
 
 # TODO: some sort of migration log to permit future changes to schema?
 
@@ -36,8 +36,7 @@ def q_create_pkg_table() -> str:
     return str(Query.create_table("pkgs").columns(
         Column("pkg", "VARCHAR(100)", nullable=False),
         Column("version", "VARCHAR(100)", nullable=False),
-        Column("repo", "VARCHAR(100)", nullable=False),
-        Column("info", "TEXT", nullable=False),
+        Column("release", "INTEGER", nullable=False),
     ).primary_key("pkg").if_not_exists())
 
 
@@ -57,6 +56,17 @@ def q_create_index(tbl: str, columns: List[str]) -> str:
 
 def q_drop_table(tbl: str, if_exists=True) -> str:
     return f"""DROP TABLE {"IF EXISTS" if if_exists else ""} {tbl}"""
+
+
+def record_pkg(conn: sqlite3.Connection, info: PkgInfo):
+    conn.execute(
+        """INSERT INTO pkgs (pkg, version, release) VALUES (?, ?, ?)""",
+        (info.name, info.version, info.release))
+
+
+def has_pkg(conn: sqlite3.Connection, pkg_name: str) -> bool:
+    return conn.execute(
+        """SELECT pkg FROM pkgs WHERE pkg = ?""", (pkg_name,)).fetchone() is not None
 
 
 def q_record_files(pkg: str, manifest: PkgManifest) -> str:
@@ -82,6 +92,10 @@ def pkg_files_installed(conn: sqlite3.Connection, pkg: str) -> List[Tuple[Path, 
 def rm_pkg(conn: sqlite3.Connection, pkg: str):
     conn.execute("DELETE FROM files where pkg = ?", (pkg,))
     conn.execute("DELETE FROM pkgs where pkg = ?", (pkg,))
+
+
+def q_pkgs_ls():
+    return "SELECT pkg, version, release FROM pkgs"
 
 
 def init_db():

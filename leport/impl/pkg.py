@@ -341,6 +341,7 @@ def install(config: Config, pkg: PkgFile, conflicts: List[Tuple[Path, bool]]):
 
                 # record entries for files which we've installed and whose hash matched the one in the manifest
                 conn.execute(db.q_record_files(info.name, PkgManifest(files=installed_files_checksums)))
+                db.record_pkg(conn, info)
 
                 try:
                     hooks.postinst()
@@ -383,6 +384,7 @@ def remove(config: Config, name: PkgName):
             for fpath, hash in installed_files:
                 # TODO - should we bubble up with an iterator here or do it up-front like for install?
                 fs.rm(fpath)
+            fs.rmtree(install_md_dir)
             db.rm_pkg(conn, name.name)
 
     try:

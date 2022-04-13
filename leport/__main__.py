@@ -1,18 +1,19 @@
 import sys
 import os
-import typer
+from typing import Optional
 from pathlib import Path
+import typer
+import click
 from rich import print
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Confirm
 from pydantic.errors import PydanticValueError
 from leport.impl.config import get_config, set_config, get_config_file_path, set_config_file_path, DEFAULT_CONFIG
-from leport.utils.cli import add_typer_with_alias
 import leport.impl.db as db
 import leport.impl.pkg as pkg
 import leport.impl.pkgbuild as pkgbuild
 from leport.impl.types.pkg import PkgName, PkgFile
 from leport.impl.types.repos import RepoNotFoundError
-import leport.commands.repos
+from leport.impl.repos import refresh_repos
 from leport.utils.cli import command
 
 
@@ -24,14 +25,19 @@ def yes_or_no(question: str) -> bool:
             return reply in ("y", "yes")
 
 
-app = typer.Typer(no_args_is_help=True)
-add_typer_with_alias(
-    app,
-    leport.commands.repos.app,
-    name="repos",
-    alias="r",
-    help="commands to manage repos"
-)
+class NaturalOrderGroup(click.Group):
+    def list_commands(self, ctx):
+        return self.commands.keys()
+
+
+app = typer.Typer(cls=NaturalOrderGroup, no_args_is_help=True)
+# add_typer_with_alias(
+#     app,
+#     leport.commands.repos.app,
+#     name="repos",
+#     alias="r",
+#     help="commands to manage repos"
+# )
 
 
 @app.callback()
@@ -131,6 +137,19 @@ def search(name: str = typer.Argument(..., help="name of package to search for")
         print(f"[dim gray]* [yellow]{match.repo.name}[b white]/[bold magenta]{match.name}")
 
 
+@command(app, name="packages", alias="pls", no_args_is_help=False)
+def pkg_list():
+    """List installed packages"""
+    with db.get_conn() as conn:
+        pkgs = conn.execute(db.q_pkgs_ls()).fetchall()
+        if len(pkgs) == 0:
+            print("[bold yellow]No packages installed")
+            sys.exit(2)
+        print("Installed Packages:")
+        for pkg_name, version, release in pkgs:
+            print(f"[bold white]* [magenta]{pkg_name} [/magenta]([blue]{version}-{release}[/blue])")
+
+
 @command(app, name="build", alias="b", no_args_is_help=True)
 def build(pkg_name: str = typer.Argument(..., metavar="pkg", help="name of package, either '<pkg>' or qualified '<repo>/<pkg>'"),
             clean: bool = typer.Option(True, help="if set, clean build directory and start from scratch")):
@@ -155,7 +174,6 @@ def build(pkg_name: str = typer.Argument(..., metavar="pkg", help="name of packa
 def install(pkg_fpath: Path = typer.Argument(..., metavar="pkg", exists=True, file_okay=True, readable=True, help="path to packagefile"),
             force: bool = typer.Option(default=False, help="automatically accept package overwrites")):
     """Install binary package"""
-    print("INstALL")
     try:
         pkg_file = PkgFile(path=pkg_fpath)
     except PydanticValueError as e:
@@ -168,6 +186,11 @@ def install(pkg_fpath: Path = typer.Argument(..., metavar="pkg", exists=True, fi
 
     with db.get_conn() as conn:
         warned = False
+
+        info = pkg.extract_info(pkg_file)
+        if db.has_pkg(conn, info.name):
+            print(f"[bold red]Already got a package named '{info.name}' installed, to upgrade, first remove it, then install")
+            sys.exit(2)
 
         conflicts = []
         for file in pkg.install_conflicts(pkg_file):
@@ -212,9 +235,9 @@ def remove(pkg_name: str = typer.Argument(..., metavar="pkg", help="name of pack
     pkg.remove(get_config(), PkgName.from_str(pkg_name))
 
 
-@command(app, name="owns", alias="o", no_args_is_help=True)
-def owns(file: Path = typer.Argument(..., help="check which package (if any) owns this file")):
-    """Query which package (if any) owns a given file."""
+@command(app, name="which", alias="w", no_args_is_help=True)
+def which(file: Path = typer.Argument(..., help="check which package (if any) owns this file")):
+    """which package owns file? (if any)"""
     conn = db.get_conn()
     pkg = db.which_pkg_owns_file(conn, str(file))
     if pkg is None:
@@ -225,8 +248,8 @@ def owns(file: Path = typer.Argument(..., help="check which package (if any) own
         sys.exit(1)
 
 
-@command(app, name="list-files", alias="ls", no_args_is_help=True)
-def list_files(pkg_name: str = typer.Argument(..., metavar="pkg", help="TODO TODO")):
+@command(app, name="files", alias="fls", no_args_is_help=True)
+def pkg_files(pkg_name: str = typer.Argument(..., metavar="pkg", help="TODO TODO")):
     """Query files owned by a given package"""
     conn = db.get_conn()
     files = db.pkg_files_installed(conn, pkg_name)
@@ -237,6 +260,29 @@ def list_files(pkg_name: str = typer.Argument(..., metavar="pkg", help="TODO TOD
     print(f"[bold magenta]Files for package [bold green]{pkg_name}")
     for fpath, hash in files:
         print(f"[bold blue]{str(fpath)}")
+
+
+@command(app, name="refresh", alias="rr", no_args_is_help=False)
+def repos_refresh(repo: Optional[str] = typer.Argument(None, help="repo to refresh (default: all repos)")):
+    """refresh one or all git repos"""
+    print("TODO: refresh repo :vampire:")
+    cfg = get_config()
+    refresh_repos(cfg, repo)
+
+
+@command(app, name="repos", alias="rls", no_args_is_help=False)
+def repos_list():
+    """List configured repos"""
+    cfg = get_config()
+    if len(cfg.repos) == 0:
+        print("[bold yellow]No configured repositories")
+        sys.exit(2)
+
+    print("Configured software repositories:")
+    for repo in cfg.repos:
+        print(f"[bold white] * [bold][magenta]{repo.name}[/magenta]")
+        print(f"    [bold]path: [blue]{repo.repo_dir(cfg)}[/blue]")
+        print(f"""    [bold]type: [blue]{repo.repo_type}""")
 
 
 def main():

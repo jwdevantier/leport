@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Union
 from pydantic import BaseModel, Extra, Field, root_validator
@@ -15,8 +16,13 @@ class RepoNotFoundError(Exception):
         super().__init__(f"repo '{repo_name}' does not exist")
 
 
-class BaseRepo(BaseModel):
+class BaseRepo(BaseModel, ABC):
     name: str
+
+    @property
+    @abstractmethod
+    def repo_type(self) -> str:
+        ...
 
     def repo_dir(self, config: "Config") -> Path:
         return config.dirs.repos / self.name
@@ -27,6 +33,10 @@ class BaseRepo(BaseModel):
 
 class LocalRepo(BaseRepo):
     # do not accept extra keys - avoids coercing non-compliant git entry into a local repo entry
+    @property
+    def repo_type(self) -> str:
+        return "local"
+
     class Config:
         extra = Extra.forbid
 
@@ -35,6 +45,10 @@ class GitRepo(BaseRepo):
     git: str = Field(description="url/path to git repository")
     branch: str = Field(description="branch to use", default=None)
     tag: str = Field(description="tag to use", default=None)
+
+    @property
+    def repo_type(self) -> str:
+        return "git"
 
     @root_validator
     def ensure_branch_or_tag(cls, values):
