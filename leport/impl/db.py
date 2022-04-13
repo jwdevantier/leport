@@ -1,16 +1,10 @@
 import sqlite3
 from pathlib import Path
 from typing import List, Optional, Tuple
-from pypika import Query, Column, Table
 from leport.impl.config import get_config
 from leport.impl.types.pkg import PkgManifest, PkgInfo
 
 # TODO: some sort of migration log to permit future changes to schema?
-
-
-T_SQLITE_MASTER = Table("sqlite_master")
-T_PKGS = Table("pkgs")
-T_FILES = Table("files")
 
 
 def get_conn() -> sqlite3.Connection:
@@ -21,23 +15,20 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
-def q_table_exists(tblname: str) -> str:
-    return str(Query.from_("sqlite_master")
-               .select("name")
-               .where(T_SQLITE_MASTER.type == "table")
-               .where(T_SQLITE_MASTER.name == tblname))
-
-
 def table_exists(c: sqlite3.Connection, tblname: str) -> bool:
-    return c.execute(q_table_exists(tblname)).fetchone() is not None
+    return c.execute(" ".join([
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+    ]), (tblname,)).fetchone()
 
 
-def q_create_pkg_table() -> str:
-    return str(Query.create_table("pkgs").columns(
-        Column("pkg", "VARCHAR(100)", nullable=False),
-        Column("version", "VARCHAR(100)", nullable=False),
-        Column("release", "INTEGER", nullable=False),
-    ).primary_key("pkg").if_not_exists())
+def q_create_pkgs_table() -> str:
+    return " ".join([
+        "CREATE TABLE IF NOT EXISTS pkgs (",
+        "pkg VARCHAR(100) PRIMARY KEY NOT NULL,",
+        "version VARCHAR(100) NOT NULL,",
+        "release INTEGER NOT NULL",
+        ")"
+    ])
 
 
 def q_create_files_table() -> str:
@@ -46,6 +37,16 @@ def q_create_files_table() -> str:
         "fpath VARCHAR(4096) PRIMARY KEY ON CONFLICT REPLACE NOT NULL,",
         "pkg VARCHAR(100) NOT NULL,",
         "sha256 VARCHAR(64) NOT NULL",
+        ")"
+    ])
+
+
+def q_create_dirs_table() -> str:
+    return " ".join([
+        "CREATE TABLE IF NOT EXISTS dirs (",
+        "dir TEXT NOT NULL,",
+        "pkg TEXT NOT NULL,",
+        "PRIMARY KEY (dir, pkg)",
         ")"
     ])
 
@@ -69,15 +70,15 @@ def has_pkg(conn: sqlite3.Connection, pkg_name: str) -> bool:
         """SELECT pkg FROM pkgs WHERE pkg = ?""", (pkg_name,)).fetchone() is not None
 
 
-def q_record_files(pkg: str, manifest: PkgManifest) -> str:
-    q = Query.into(T_FILES)
-    for fpath, sha256 in manifest.files.items():
-        q = q.insert(str(fpath), pkg, sha256)
-    return q.get_sql()
+def record_files(conn: sqlite3.Connection, pkg: str, manifest: PkgManifest) -> None:
+    conn.executemany(
+        "INSERT INTO files (fpath, pkg, sha256) VALUES (?, ?, ?)",
+        ((str(fpath), pkg, sha256) for fpath, sha256 in manifest.files.items())
+    )
 
 
 def which_pkg_owns_file(conn: sqlite3.Connection, fpath: str) -> Optional[str]:
-    res = conn.execute(Query.from_(T_FILES).select("pkg").where(T_FILES.fpath == fpath).get_sql()).fetchone()
+    res = conn.execute("SELECT pkg FROM files WHERE fpath = ?", (fpath,)).fetchone()
     if res is None:
         return None
     return res[0]
@@ -100,7 +101,7 @@ def q_pkgs_ls():
 
 def init_db():
     with get_conn() as conn:
-        conn.execute(q_create_pkg_table())
+        conn.execute(q_create_pkgs_table())
         conn.execute(q_create_files_table())
         conn.execute(q_create_index("files", ["pkg"]))
 
