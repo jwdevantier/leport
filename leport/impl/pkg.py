@@ -301,7 +301,8 @@ def install(config: Config, pkg: PkgFile, conflicts: List[Tuple[Path, bool]]):
 
                 conn.execute("begin")
 
-                installed_files: Set[Path] = set()
+                # will contain dirs and files
+                installed: Set[Path] = set()
 
                 def members(tf: tarfile.TarFile):
                     # extract all entries under 'files/' and strip 'files/' from path
@@ -312,17 +313,22 @@ def install(config: Config, pkg: PkgFile, conflicts: List[Tuple[Path, bool]]):
                             member.path = member.path[strip_prefix_len:]
                             p = Path("/" + member.path)
                             if p.exists():
-                                if p.is_dir() or p in exclude_files:
+                                if p in exclude_files:
                                     continue
-                                # must be overwritten
-                                # (this ensures file is restored on error, as the tmp file is deleted, THEN this file is moved back)
-                                fs.rm(p)
-                            # will yield a path, file will be extracted, mark this file for deletion on error
-                            fs.delete_on_error(p)
-                            installed_files.add(p)
+                                elif not p.is_dir():
+                                    # must be overwritten
+                                    # this operation slates file for deletion, this means the file is temporarily
+                                    # moved, and deleted if overall install succeeds, otherwise restored.
+                                    fs.rm(p)
+                            else:
+                                fs.delete_on_error(p)
+                            installed.add(p)
                             yield member
 
                 tar.extractall(path=Path("/"), members=members(tar))
+
+                installed_files = [f for f in installed if not f.is_dir()]
+                installed_dirs = [d for d in installed if d.is_dir()]
 
                 # Now we verify that all installed files' sha256 checksum match those found in the package manifest.
                 installed_files_checksums = {}
@@ -340,7 +346,8 @@ def install(config: Config, pkg: PkgFile, conflicts: List[Tuple[Path, bool]]):
                         raise RuntimeError(f"{fpath}: no entry found in manifest!")
 
                 # record entries for files which we've installed and whose hash matched the one in the manifest
-                conn.execute(db.q_record_files(info.name, PkgManifest(files=installed_files_checksums)))
+                db.record_files(conn, info.name, PkgManifest(files=installed_files_checksums))
+                db.record_dirs(conn, info.name, [d for d in installed if d.is_dir()])
                 db.record_pkg(conn, info)
 
                 try:
@@ -378,22 +385,28 @@ def remove(config: Config, name: PkgName):
         # TODO log
         print(f"[bold yellow]hook 'prerm' raised unhandled error")
 
-    with ReversibleFileActions() as fs:
-        with db.get_conn() as conn:
+    with db.get_conn() as conn:
+        with ReversibleFileActions() as fs:
             installed_files  = db.pkg_files_installed(conn, name.name)
             for fpath, hash in installed_files:
                 # TODO - should we bubble up with an iterator here or do it up-front like for install?
                 fs.rm(fpath)
             fs.rmtree(install_md_dir)
-            db.rm_pkg(conn, name.name)
+
+        pkg_dirs = db.pkg_dirs(conn, name.name)
+        db.rm_pkg(conn, name.name)
+        for fpath, count in pkg_dirs:
+            if count > 1:
+                continue
+            try:
+                fpath.rmdir()
+            except OSError as e:
+                if e.errno == 39:  # Directory must be empty, this is OK
+                    continue
+                # TODO: log other rm error here.
 
     try:
-        hooks.postinst()
+        hooks.postrm()
     except Exception as e:
         # TODO log
         print("[bold yellow]hook 'postrm' raised unhandled error")
-
-    # RM empty dirs
-    # For each file, add file.parent (dir) to set, then iter set, rm'ing those dirs which are empty
-    # TODO: maybe record installed dirs also, only rm iff. installed dir in manifest AND dir is empty.
-    pass

@@ -1,6 +1,6 @@
 import sqlite3
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 from leport.impl.config import get_config
 from leport.impl.types.pkg import PkgManifest, PkgInfo
 
@@ -77,6 +77,29 @@ def record_files(conn: sqlite3.Connection, pkg: str, manifest: PkgManifest) -> N
     )
 
 
+def record_dirs(conn: sqlite3.Connection, pkg: str, dirs: List[Path]) -> None:
+    conn.executemany(
+        "INSERT INTO dirs (dir, pkg) VALUES (?, ?)",
+        ((str(dir), pkg) for dir in dirs)
+    )
+
+
+def pkg_dirs(conn: sqlite3.Connection, pkg: str) -> List[Tuple[Path, int]]:
+    return [
+        (Path(fpath), count)
+        for fpath, count in
+        conn.execute(" ".join([
+            "SELECT Q1.dir, count",
+            "FROM",
+            "(SELECT dir, count(*) as count FROM dirs GROUP BY dir) AS Q1",
+            "INNER JOIN",
+            "(SELECT dir FROM dirs where pkg = ?) AS Q2",
+            "ON Q1.dir = Q2.dir",
+            "ORDER BY length(Q1.dir) DESC"
+        ]), (pkg,)).fetchall()
+    ]
+
+
 def which_pkg_owns_file(conn: sqlite3.Connection, fpath: str) -> Optional[str]:
     res = conn.execute("SELECT pkg FROM files WHERE fpath = ?", (fpath,)).fetchone()
     if res is None:
@@ -93,6 +116,7 @@ def pkg_files_installed(conn: sqlite3.Connection, pkg: str) -> List[Tuple[Path, 
 def rm_pkg(conn: sqlite3.Connection, pkg: str):
     conn.execute("DELETE FROM files where pkg = ?", (pkg,))
     conn.execute("DELETE FROM pkgs where pkg = ?", (pkg,))
+    conn.execute("DELETE FROM dirs where pkg = ?", (pkg,))
 
 
 def q_pkgs_ls():

@@ -118,9 +118,12 @@ def dbreset():
     import leport.impl.db as db
     with db.get_conn() as conn:
         conn.execute(db.q_drop_table("pkgs", if_exists=True))
-        conn.execute(db.q_create_pkg_table())
         conn.execute(db.q_drop_table("files", if_exists=True))
+        conn.execute(db.q_drop_table("dirs", if_exists=True))
+
+        conn.execute(db.q_create_pkgs_table())
         conn.execute(db.q_create_files_table())
+        conn.execute(db.q_create_dirs_table())
 
 
 @command(app, name="search", alias="s", no_args_is_help=True)
