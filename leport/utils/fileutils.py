@@ -1,6 +1,7 @@
 import grp
 import hashlib
 import importlib.util
+import re
 import shutil
 from urllib.request import urlretrieve
 from urllib.parse import urlparse
@@ -8,7 +9,9 @@ from typing import Optional, Union, Generator, Dict, Any
 from types import ModuleType
 from pathlib import Path
 import pwd
+from re import compile as re_compile
 from contextlib import contextmanager
+from dataclasses import dataclass
 import os
 import glob
 import subprocess
@@ -221,13 +224,78 @@ def which_programs(*progs: str):
 
 
 class MissingProgramsError(Error):
-    def message(self) -> str:
-        return "One or more programs required for building or running the program are missing"
+    def display_error(self) -> None:
+        print("One or more programs required for building or running the program are missing")
+        for program in self.context["programs"]:
+            print(f"[bold white]* [magenta]{str(program)}")
 
 
 def require_programs(*progs: str) -> None:
     r = which_programs(*progs)
-    missing = {k: v for k, v in r.items() if v is None}
+    missing = {k for k, v in r.items() if v is None}
     if missing:
-        raise MissingProgramsError(missing)
+        raise MissingProgramsError(programs=missing)
     return None
+
+
+def find_program(prog: str, *dirs) -> Optional[str]:
+    p = shutil.which(prog)
+    if p:
+        return p
+    for dir in dirs:
+        if not isinstance(dir, Path):
+            dir = Path(dir)
+        prog_path = dir / prog
+        if not prog_path.exists() or not os.access(prog_path, os.X_OK):
+            continue
+        return str(prog_path)
+    return None
+
+
+_ldconfig_list_libs_rgx = re_compile(r"\s*(?P<libname>.+(?= \())(?:.*(?=\=>\s+)=>\s+(?P<path>.*))")
+
+
+class MissingLibrariesError(Error):
+    def display_error(self) -> None:
+        print("One or more programs required for building or running the program are missing:")
+        for lib in self.context["libraries"]:
+            print(f"[bold white]* [magenta]{str(lib)}")
+
+
+@dataclass()
+class LDConfigLibs:
+    # path -> fname
+    db: Dict[str, str]
+
+    def find_exact(self, lib: str) -> Dict[str, str]:
+        return {
+            k: v for k, v in self.db.items()
+            if v == lib
+        }
+
+    def find_rgx(self, query: Union[str, re.Pattern]) -> Dict[str, str]:
+        if isinstance(query, str):
+            query = re.compile(query)
+        return {
+            k: v for k, v in self.db.items()
+            if query.match(v)
+        }
+
+    def require_libraries_rgx(self, *libs: Union[str, re.Pattern]):
+        missing_libs = set()
+        for lib in libs:
+            if not self.find_rgx(lib):
+                missing_libs.add(lib)
+        if missing_libs:
+            raise MissingLibrariesError(libraries=missing_libs)
+
+
+def ldconfig() -> LDConfigLibs:
+    res = {}
+    ldconfig = find_program("ldconfig", "/sbin", "/usr/sbin", "/bin")
+    if ldconfig is None:
+        raise RuntimeError("cannot find program 'ldconfig'")
+    lines = sh(ldconfig, "-p", capture=True).stdout.strip()
+    for m in _ldconfig_list_libs_rgx.finditer(lines):
+        res[m.group("path")] = m.group("libname")
+    return LDConfigLibs(db=res)
