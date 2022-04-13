@@ -1,9 +1,10 @@
 import grp
 import hashlib
 import importlib.util
+import shutil
 from urllib.request import urlretrieve
 from urllib.parse import urlparse
-from typing import Optional, Union, Generator
+from typing import Optional, Union, Generator, Dict, Any
 from types import ModuleType
 from pathlib import Path
 import pwd
@@ -14,6 +15,7 @@ import subprocess
 from rich.progress import Progress
 from rich import print
 import tempfile
+from leport.utils.errors import Error
 
 
 def url_fname(url: str) -> str:
@@ -209,3 +211,23 @@ def get_paths(root_dir: Path, *patterns: str) -> Generator[Path, None, None]:
                     yield p, True
                 else:
                     yield p, False
+
+
+def which_programs(*progs: str):
+    return {
+        prog: shutil.which(prog)
+        for prog in progs
+    }
+
+
+class MissingProgramsError(Error):
+    def message(self) -> str:
+        return "One or more programs required for building or running the program are missing"
+
+
+def require_programs(*progs: str) -> None:
+    r = which_programs(*progs)
+    missing = {k: v for k, v in r.items() if v is None}
+    if missing:
+        raise MissingProgramsError(missing)
+    return None
