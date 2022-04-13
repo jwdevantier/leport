@@ -3,12 +3,14 @@ from typing import Dict, Any
 
 
 class Error(Exception, ABC):
-    def __init__(self, context: Dict[str, Any]):
-        self.__context = context
+    def __init__(self, **kwargs):
+        self._context = kwargs
 
+    @property
     def context(self) -> Dict[str, Any]:
-        return self.__context
+        return self._context
 
     @abstractmethod
-    def message(self) -> str:
+    def display_error(self) -> None:
+        """Print error to terminal."""
         ...

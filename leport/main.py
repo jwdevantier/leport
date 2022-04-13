@@ -7,6 +7,7 @@ import typer
 import click
 from rich import print
 from rich.prompt import Confirm
+from rich.pretty import pprint
 from pydantic.errors import PydanticValueError
 from leport.impl.config import set_leport_root, get_leport_root, load_config, get_config, DEFAULT_CONFIG
 import leport.impl.db as db
@@ -17,6 +18,7 @@ from leport.impl.types.repos import RepoNotFoundError
 from leport.impl.repos import refresh_repos
 from leport.utils.cli import command
 from leport.utils.fileutils import sh, group_info, current_group
+from leport.utils.errors import Error
 
 
 class NaturalOrderGroup(click.Group):
@@ -322,4 +324,13 @@ def repos_list():
 
 
 def main():
-    app()
+    try:
+        app()
+    except Error as e:
+        print("[red]Fatal error occurred:")
+        print("[red]---------------------")
+        print("[yellow]Context:")
+        pprint(e.context)
+        print("\n")
+        e.display_error()
+        sys.exit(1)
