@@ -146,16 +146,12 @@ def makepkg(info: PkgInfo,
             # ... and compare it to the set of all files/dirs for which the pkg defined permissions
             pkg_perms = set(perms.keys())
             if (pkg_contents - pkg_perms):
-                print("UN-PERMED FILES")
                 print(pkg_contents - pkg_perms)
                 # TODO: some files/dirs have no perms assigned, raise error
                 import sys
                 sys.exit(1)
-            else:
-                print("ALL PERMED")
 
             # TODO: can raise errors if entry does not have all required fields set.
-            print(repr(perms))
             manifest = PkgManifest(
                 file_checksums=checksums,
                 stat={root_path / k: PkgManifestStat(**v)
