@@ -224,8 +224,10 @@ def install(pkg_fpath: Path = typer.Argument(..., metavar="pkg", exists=True, fi
 
         conflicts = []
         for file in pkg.install_conflicts(pkg_file):
+            if force:
+                continue
             # display one-time warning
-            if warned is False and force is False:
+            if warned is False:
                 print("[yellow]File conflict detected - one or more files in the package conflict with existing files[/yellow]")
                 print("")
                 print("You will be asked whether to overwrite the existing file for each conflict found.")
