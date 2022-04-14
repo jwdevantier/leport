@@ -94,7 +94,6 @@ def init():
         sh("groupadd", group_name)
 
     root = get_leport_root()
-    cfg_fpath = root / "config.yml"
 
     print(f"LEPORT_ROOT: {root}")
     print("")
@@ -117,6 +116,7 @@ def init():
         dir.mkdir(parents=True, exist_ok=True)
         sh("chgrp", "-R", group_name, str(dir))
 
+    cfg_fpath = root / "config.yml"
     if not cfg_fpath.exists():
         with open(cfg_fpath, "w") as fh:
             for line in DEFAULT_CONFIG.splitlines():
