@@ -190,6 +190,12 @@ def stat_set(path: Path,
         os.chmod(path, perms)
 
 
+def _join(dirname, basename):
+    if not dirname or not basename:
+        return dirname or basename
+    return os.path.join(dirname, basename)
+
+
 def get_paths(root_dir: Path, *patterns: str) -> Generator[Path, None, None]:
     """Compute paths.
 
@@ -206,11 +212,15 @@ def get_paths(root_dir: Path, *patterns: str) -> Generator[Path, None, None]:
     """
     matched = set()
     for pattern in patterns:
-        for res in glob.glob(pattern, recursive=True, root_dir=root_dir):
-            if res not in matched:
-                matched.add(res)
-                p = Path(res)
-                if (root_dir / p).is_dir():
+        abs_pattern = _join(root_dir, pattern)
+        if not root_dir in Path(abs_pattern).parents:
+            raise RuntimeError("all patterns must be relative to the provided root_dir")
+        for res in glob.glob(abs_pattern, recursive=True):
+            p = Path(res).relative_to(root_dir)
+            if str(p) not in matched:
+                matched.add(str(p))
+                # p = Path(res)
+                if Path(res).is_dir():
                     yield p, True
                 else:
                     yield p, False
